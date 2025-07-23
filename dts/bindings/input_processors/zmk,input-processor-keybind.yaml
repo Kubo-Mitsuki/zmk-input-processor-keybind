@@ -17,6 +17,9 @@ properties:
   track_remainders:
     type: boolean
     description: Track remaining movement
+  continuous_key_press:
+    type: boolean
+    description: "If true, the bound keys will be held down continuously while trackball movement is detected, rather than being pressed and released per tick."
   bindings:
     description: "Behaviors to be invoked"
     type: phandle-array

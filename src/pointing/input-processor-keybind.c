@@ -24,11 +24,22 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
+enum zip_keybind_key_state {
+    ZIP_KEY_NONE = 0,
+    ZIP_KEY_RIGHT = 1,
+    ZIP_KEY_LEFT = 2,
+    ZIP_KEY_HORIZONTAL = BIT(ZIP_KEY_LEFT) | BIT(ZIP_KEY_RIGHT),
+    ZIP_KEY_DOWN = 3,
+    ZIP_KEY_UP = 4,
+    ZIP_KEY_VERTICAL = BIT(ZIP_KEY_UP) | BIT(ZIP_KEY_DOWN),
+};
+
 struct zip_keybind_config {
     uint8_t index;
     uint8_t mode;
 
     bool track_remainders;
+    bool continuous_key_press;
     const struct zmk_behavior_binding *bindings;
     uint32_t tap_ms;
     uint32_t wait_ms;
@@ -49,6 +60,7 @@ struct zip_keybind_data {
 
     int32_t max_delta;
     uint8_t device_index;
+    enum zip_keybind_key_state state;
 
     const struct device *dev;
     struct k_work_delayable press_work;
@@ -144,9 +156,6 @@ static int zip_keybind_handle_event(const struct device *dev, struct input_event
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    LOG_DBG("dev: %d evt: %d val: %d thresh: %d sync: %d dx: %d dy: %d", state->input_device_index,
-            event->code, value, cfg->threshold, (int)event->sync, data->delta_x, data->delta_y);
-
     // cutoff small or very large movements
     if (cfg->threshold > abs(value) || abs(value) > cfg->max_threshold)
         return ZMK_INPUT_PROC_STOP;
@@ -165,8 +174,6 @@ static int zip_keybind_handle_event(const struct device *dev, struct input_event
         return ZMK_INPUT_PROC_STOP;
 
     int32_t movement = approx_hypot(abs(data->last_delta_x), abs(data->last_delta_y));
-    LOG_DBG("movement: %d th: %d max th: %d", movement, cfg->threshold, cfg->max_threshold);
-    // cutoff small or very large movements
 
     if (cfg->mode == 0) {
         keybind_handle_raw(data, cfg);
@@ -181,7 +188,10 @@ static int zip_keybind_handle_event(const struct device *dev, struct input_event
 
     if (has_pending_movement(data, cfg)) {
         data->device_index = state->input_device_index;
-        k_work_schedule(&data->press_work, K_NO_WAIT);
+
+        if (!k_work_delayable_is_pending(&data->press_work)) {
+            k_work_schedule(&data->press_work, K_NO_WAIT);
+        }
     }
 
     return ZMK_INPUT_PROC_STOP;
@@ -192,8 +202,14 @@ static inline uint32_t get_position(const struct zip_keybind_data *data,
     return ZMK_VIRTUAL_KEY_POSITION_BEHAVIOR_INPUT_PROCESSOR(data->device_index, cfg->index);
 }
 
-static int exec_one_binding(const struct zip_keybind_data *data,
-                            const struct zip_keybind_config *cfg, int idx) {
+static int invoke_binding(struct zip_keybind_data *data, const struct zip_keybind_config *cfg,
+                          int idx, bool pressed) {
+    if ((pressed && data->state & BIT(idx)) || (!pressed && (data->state & BIT(idx) == 0)))
+        return 0; // already pressed or released, skip
+
+    // normalize key flag to array index position
+    int bindingId = idx - 1;
+
     struct zmk_behavior_binding_event behavior_event = {
         .position = get_position(data, cfg),
         .timestamp = k_uptime_get(),
@@ -202,60 +218,27 @@ static int exec_one_binding(const struct zip_keybind_data *data,
 #endif
     };
 
-    LOG_DBG("trigger binding: bh: %s 0x%02x 0x%02x tap: %d ms hold %d ms",
-            cfg->bindings[idx].behavior_dev, cfg->bindings[idx].param1, cfg->bindings[idx].param2,
-            cfg->tap_ms, cfg->wait_ms);
+    int ret = zmk_behavior_invoke_binding(&cfg->bindings[bindingId], behavior_event, pressed);
 
-    int ret = zmk_behavior_invoke_binding(&cfg->bindings[idx], behavior_event, true);
-    if (ret < 0) {
-        return ret;
+    if (ret == 0) {
+        if (pressed)
+            data->state |= BIT(idx);
+        else
+            data->state &= ~BIT(idx);
     }
 
-    if (cfg->tap_ms > 0)
-        k_sleep(K_MSEC(cfg->tap_ms));
-    behavior_event.timestamp = k_uptime_get();
+    LOG_DBG("trigger binding: bh: %s 0x%02x 0x%02x pressed: %s state %X",
+            cfg->bindings[bindingId].behavior_dev, cfg->bindings[bindingId].param1,
+            cfg->bindings[bindingId].param2, pressed ? "true" : "false", data->state);
 
-    ret = zmk_behavior_invoke_binding(&cfg->bindings[idx], behavior_event, false);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return 0;
+    return ret;
 }
 
-static int exec_two_bindings(const struct zip_keybind_data *data,
-                             const struct zip_keybind_config *cfg, int idx, int idy) {
-    struct zmk_behavior_binding_event behavior_event = {
-        .position =
-            ZMK_VIRTUAL_KEY_POSITION_BEHAVIOR_INPUT_PROCESSOR(data->device_index, cfg->index),
-        .timestamp = k_uptime_get(),
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-        .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
-#endif
-    };
-
-    LOG_DBG("trigger binding: bh: %s 0x%02x 0x%02x tap: %d ms hold %d ms",
-            cfg->bindings[idx].behavior_dev, cfg->bindings[idx].param1, cfg->bindings[idx].param2,
-            cfg->tap_ms, cfg->wait_ms);
-
-    int ret = zmk_behavior_invoke_binding(&cfg->bindings[idx], behavior_event, true);
-    if (ret < 0) {
-        return ret;
+static inline void check_and_release_key(struct zip_keybind_data *data,
+                                         const struct zip_keybind_config *cfg, int idx) {
+    if (data->state & BIT(idx)) {
+        invoke_binding(data, cfg, idx, false);
     }
-
-    // mutual tap delay will be handled inside
-    ret = exec_one_binding(data, cfg, idy);
-    if (ret < 0) {
-        return ret;
-    }
-
-    behavior_event.timestamp = k_uptime_get();
-    ret = zmk_behavior_invoke_binding(&cfg->bindings[idx], behavior_event, false);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return 0;
 }
 
 static void press_work_cb(struct k_work *work) {
@@ -264,42 +247,63 @@ static void press_work_cb(struct k_work *work) {
     const struct device *dev = data->dev;
     const struct zip_keybind_config *cfg = dev->config;
 
-    while (has_pending_movement(data, cfg)) {
-        int idx = -1;
-        int idy = -1;
+    bool has_queued_movement = has_pending_movement(data, cfg);
+
+    if (data->state != ZIP_KEY_NONE && (!cfg->continuous_key_press || !has_queued_movement)) {
+        // release keys, naive implementation
+        check_and_release_key(data, cfg, ZIP_KEY_LEFT);
+        check_and_release_key(data, cfg, ZIP_KEY_RIGHT);
+        check_and_release_key(data, cfg, ZIP_KEY_UP);
+        check_and_release_key(data, cfg, ZIP_KEY_DOWN);
+
+        // wait after release
+        k_sleep(K_MSEC(cfg->wait_ms));
+    }
+
+    if (has_queued_movement) {
+        int idx = ZIP_KEY_NONE;
+        int idy = ZIP_KEY_NONE;
 
         if (abs(data->delta_x) >= cfg->tick) {
             if (data->delta_x > 0) { // RIGHT
-                idx = 0;
+                idx = ZIP_KEY_RIGHT;
                 data->delta_x -= cfg->tick;
+
+                check_and_release_key(data, cfg, ZIP_KEY_LEFT);
             } else { // LEFT
-                idx = 1;
+                idx = ZIP_KEY_LEFT;
                 data->delta_x += cfg->tick;
+
+                data->state |= ZIP_KEY_LEFT;
+
+                check_and_release_key(data, cfg, ZIP_KEY_RIGHT);
             }
         }
 
         if (abs(data->delta_y) >= cfg->tick) {
             if (data->delta_y > 0) { // UP
-                idy = 3;
+                idy = ZIP_KEY_UP;
                 data->delta_y -= cfg->tick;
+
+                check_and_release_key(data, cfg, ZIP_KEY_DOWN);
             } else { // DOWN
-                idy = 2;
+                idy = ZIP_KEY_DOWN;
                 data->delta_y += cfg->tick;
+
+                check_and_release_key(data, cfg, ZIP_KEY_UP);
             }
         }
 
-        if (idx >= 0 && idy >= 0) {
-            exec_two_bindings(data, cfg, idx, idy);
-        } else if (idx >= 0) {
-            exec_one_binding(data, cfg, idx);
-        } else if (idy >= 0) {
-            exec_one_binding(data, cfg, idy);
-        }
+        if (idx != ZIP_KEY_NONE)
+            invoke_binding(data, cfg, idx, true);
 
-        if (cfg->wait_ms > 0)
-            k_sleep(K_MSEC(cfg->wait_ms));
+        if (idy != ZIP_KEY_NONE)
+            invoke_binding(data, cfg, idy, true);
+
+        k_work_schedule(&data->press_work, K_MSEC(cfg->tap_ms));
     }
 
+    // clear remainders after all movement processed
     if (!cfg->track_remainders) {
         data->delta_x = 0;
         data->delta_y = 0;
@@ -329,6 +333,7 @@ static int zip_keybind_init(const struct device *dev) {
     static struct zip_keybind_data zip_keybind_data_##n = {                                        \
         .delta_x = 0,                                                                              \
         .delta_y = 0,                                                                              \
+        .state = ZIP_KEY_NONE,                                                                     \
     };                                                                                             \
     static struct zmk_behavior_binding zip_keybind_config_bindings_##n[] =                         \
         TRANSFORMED_BINDINGS(n);                                                                   \
@@ -337,10 +342,11 @@ static int zip_keybind_init(const struct device *dev) {
         .mode = DT_INST_PROP_OR(n, mode, 0),                                                       \
         .bindings = zip_keybind_config_bindings_##n,                                               \
         .track_remainders = DT_INST_PROP_OR(n, track_remainders, false),                           \
+        .continuous_key_press = DT_INST_PROP_OR(n, continuous_key_press, false),                   \
         .tap_ms = DT_INST_PROP_OR(n, tap_ms, 20),                                                  \
         .wait_ms = DT_INST_PROP_OR(n, wait_ms, 0),                                                 \
         .tick = DT_INST_PROP_OR(n, tick, 10),                                                      \
-        .threshold = DT_INST_PROP_OR(n, threshold, 1),                                            \
+        .threshold = DT_INST_PROP_OR(n, threshold, 1),                                             \
         .max_threshold = DT_INST_PROP_OR(n, max_threshold, 200),                                   \
         .max_pending_activations = DT_INST_PROP_OR(n, max_pending_activations, 5)};                \
     DEVICE_DT_INST_DEFINE(n, &zip_keybind_init, NULL, &zip_keybind_data_##n,                       \
