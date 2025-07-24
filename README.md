@@ -30,20 +30,26 @@ Include this module on your ZMK's west manifest in `config/west.yml`:
 ```yaml
 manifest:
   remotes:
-    #...
+    # ...
     # START #####
     - name: zettaface
       url-base: https://github.com/zettaface
     # END #######
-    #...
+    # ...
   projects:
-    #...
+    # ...
+    # Optional: Use this fork of ZMK in case of troubles with simultaneous actions
+    # - name: zmk
+    #   remote: zettaface
+    #   revision: main
+    #   import: app/west.yml
+    # ...
     # START #####
     - name: zmk-input-processor-keybind
       remote: zettaface
       revision: main
     # END #######
-    #...
+    # ...
 ```
 
 ## Configuration
@@ -104,8 +110,8 @@ Roughly, `overlay` of the split-peripheral trackball should look like below.
         track_remainders;
         bindings = <&kp RIGHT>,
                   <&kp LEFT>,
-                  <&kp UP>,
-                  <&kp DOWN>;
+                  <&kp DOWN>,
+                  <&kp UP>;
         tick = <40>;
         wait-ms = <0>;
         tap-ms = <10>;
@@ -126,8 +132,8 @@ Roughly, `overlay` of the split-peripheral trackball should look like below.
     zip_keybind_arrows: zip_keybind_arrows {
         compatible = "zmk,input-processor-keybind";
         #input-processor-cells = <0>;
-        bindings = <&kp LEFT>,
-                  <&kp RIGHT>,
+        bindings = <&kp RIGHT>,
+                  <&kp LEFT>,
                   <&kp DOWN>,
                   <&kp UP>;
         tick = <10>;
