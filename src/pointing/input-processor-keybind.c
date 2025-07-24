@@ -278,6 +278,10 @@ static void press_work_cb(struct k_work *work) {
 
                 check_and_release_key(data, cfg, ZIP_KEY_RIGHT);
             }
+        } else if (cfg->continuous_key_press) {
+            // Check and release horizontal keys since no movement on this axis detected
+            check_and_release_key(data, cfg, ZIP_KEY_LEFT);
+            check_and_release_key(data, cfg, ZIP_KEY_RIGHT);
         }
 
         if (abs(data->delta_y) >= cfg->tick) {
@@ -292,6 +296,10 @@ static void press_work_cb(struct k_work *work) {
 
                 check_and_release_key(data, cfg, ZIP_KEY_UP);
             }
+        } else if (cfg->continuous_key_press) {
+            // Check and release vertical keys since no movement on this axis detected
+            check_and_release_key(data, cfg, ZIP_KEY_UP);
+            check_and_release_key(data, cfg, ZIP_KEY_DOWN);
         }
 
         if (idx != ZIP_KEY_NONE)
