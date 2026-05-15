@@ -157,8 +157,10 @@ static int zip_keybind_handle_event(const struct device *dev, struct input_event
     }
 
     // cutoff small or very large movements
-    if (cfg->threshold > abs(value) || abs(value) > cfg->max_threshold)
+    if (cfg->threshold > abs(value) || abs(value) > cfg->max_threshold) {
+        event->value = 0; // 追加: しきい値外でもカーソルを完全に止める
         return ZMK_INPUT_PROC_STOP;
+    }
 
     // Accumulate movement
     if (event->code == INPUT_REL_X) {
@@ -168,6 +170,8 @@ static int zip_keybind_handle_event(const struct device *dev, struct input_event
     } else {
         return ZMK_INPUT_PROC_CONTINUE;
     }
+
+    event->value = 0; // 追加: エンコーダの計算完了後、OSへ渡るマウス移動量を0に上書きする
 
     // wait until full movement readed
     if (!event->sync)
